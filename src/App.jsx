@@ -341,6 +341,33 @@ export default function App() {
     };
   }, [data.members, yd]);
 
+  // recommendations for meeting up ABROAD: consecutive periods where 2+ people are abroad together
+  const abroadRecs = useMemo(() => {
+    const total = data.members.length; if (total === 0) return { runs:[], total };
+    const dates = Object.keys(abroadCountsMap).filter(d => d.startsWith(String(year))).sort();
+    const picked = dates.filter(d => abroadCountsMap[d] >= 2);
+    const runs = [];
+    for (const d of picked) {
+      const last = runs[runs.length-1];
+      if (last && daysBetween(last.end, d) === 1) { last.end = d; last.peak = Math.max(last.peak, abroadCountsMap[d]); }
+      else runs.push({ start:d, end:d, peak: abroadCountsMap[d] });
+    }
+    runs.sort((a,b) => b.peak - a.peak || daysBetween(b.start,b.end) - daysBetween(a.start,a.end));
+    return { runs, total };
+  }, [abroadCountsMap, data.members, year]);
+
+  // turn a list of date strings into consecutive ranges {start,end}
+  const memberAbroadRanges = useCallback((m) => {
+    const sorted = [...((yd.abroad && yd.abroad[m]) || [])].filter(d => d.startsWith(String(year))).sort();
+    const runs = [];
+    for (const d of sorted) {
+      const last = runs[runs.length-1];
+      if (last && daysBetween(last.end, d) === 1) last.end = d;
+      else runs.push({ start:d, end:d });
+    }
+    return runs;
+  }, [yd, year]);
+
   const sheetMonths = useMemo(() => MONTHS.map((mn, mi) => {
     const dim = new Date(year, mi+1, 0).getDate(); const days = [];
     for (let d=1; d<=dim; d++) {
@@ -412,6 +439,7 @@ export default function App() {
             <button className={view==="group"?"on":""} onClick={() => setView("group")}>Heatmap</button>
             <button className={view==="sheet"?"on":""} onClick={() => setView("sheet")}>Spreadsheet</button>
             <button className={view==="recs"?"on":""} onClick={() => setView("recs")}>Recommendations</button>
+            <button className={view==="abroadrecs"?"on":""} onClick={() => setView("abroadrecs")}>✈️ Meet abroad</button>
           </div>
           {view==="mine" && (
             <div className="tc-toggle" style={{ marginLeft:4 }}>
@@ -616,6 +644,57 @@ export default function App() {
                 </div>);
               })}
             </>)}
+          </div>
+        )}
+
+        {view==="abroadrecs" && (
+          <div className="tc-rec">
+            <h2>✈️ Meet up abroad</h2>
+            <div className="lead">
+              {year} · Periods when 2 or more of you are in another country at the same time — handy for meeting up overseas.
+            </div>
+
+            {abroadRecs.runs.length === 0 && (
+              <div className="tc-empty">No overlapping trips abroad yet. When two or more people mark the same days as ✈️ abroad, they'll show up here.</div>
+            )}
+
+            {abroadRecs.runs.slice(0,8).map((r,i) => {
+              const who = rangeAvail(r.start, r.end).abroad;
+              return (
+                <div className="tc-reccard" key={"ab"+i} style={{ borderColor:"#ed7d3a", background:"#fdf1e7" }}>
+                  <span className="tc-badge" style={{ background:"#ed7d3a", color:"#fff" }}>✈️ {r.peak} abroad together</span>
+                  <div className="rng">{fmtRange(r.start, r.end)}</div>
+                  <div className="meta">{daysBetween(r.start,r.end)+1} day{daysBetween(r.start,r.end)>0?"s":""}</div>
+                  <div className="tc-avail-rows"><div className="tc-avail-row">
+                    <span style={{ fontSize:13, color:"#c2641f", fontWeight:700, minWidth:80 }}>✈️ Abroad</span>
+                    <div className="tc-avail-names">{who.map(m => (
+                      <span key={m} className="tc-avail-name">
+                        <span className="tc-ava tc-ava-lg" style={{ background:colorFor(m,data.members) }}>{initials(m)}</span>{m}
+                      </span>))}</div>
+                  </div></div>
+                </div>
+              );
+            })}
+
+            {/* per-person abroad schedule */}
+            <div style={{ fontFamily:"'Fraunces',serif", fontSize:17, margin:"24px 0 12px" }}>Who's abroad and when</div>
+            {data.members.map(m => {
+              const ranges = memberAbroadRanges(m);
+              return (
+                <div className="tc-reccard" key={"who"+m} style={{ padding:"12px 16px" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom: ranges.length?8:0 }}>
+                    <span className="tc-ava tc-ava-lg" style={{ background:colorFor(m,data.members) }}>{initials(m)}</span>
+                    <b>{m}</b>
+                  </div>
+                  {ranges.length === 0
+                    ? <span style={{ fontSize:13, color:"var(--ink-soft)", fontStyle:"italic" }}>No trips abroad marked in {year}</span>
+                    : <div className="tc-avail-names">{ranges.map((r,i) => (
+                        <span key={i} className="tc-avail-name" style={{ background:"#fbdcc4", color:"#a8521b" }}>
+                          ✈️ {fmtRange(r.start, r.end)}
+                        </span>))}</div>}
+                </div>
+              );
+            })}
           </div>
         )}
 
