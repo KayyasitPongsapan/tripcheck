@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
-import { fetchAll, addMember, saveAvailability, saveHolidays } from "./supabaseClient";
+import { fetchAll, addMember, saveAvailability, saveHolidays, saveAbroad } from "./supabaseClient";
 
 // TripCheck — group day-off availability planner (Supabase + Vercel)
 
@@ -84,6 +84,8 @@ const css = `
 .tc-day.holiday { background:var(--gold-soft); color:var(--gold); font-weight:700; }
 .tc-day.holiday::after { content:''; position:absolute; top:3px; right:3px; width:5px; height:5px; border-radius:50%; background:var(--gold); }
 .tc-day.mine { background:var(--teal); color:#fff; font-weight:700; }
+.tc-day.abroad { background:#ed7d3a; color:#fff; font-weight:700; }
+.tc-day .plane { position:absolute; top:1px; left:3px; font-size:8px; }
 .tc-day .cnt { position:absolute; bottom:1px; right:3px; font-size:8px; font-weight:700; opacity:.8; }
 .tc-tooltip { position:fixed; background:var(--ink); color:#fff; border-radius:12px; padding:11px 14px;
   font-size:13px; z-index:1000; min-width:160px; max-width:220px; box-shadow:0 8px 24px #00000030; pointer-events:none; }
@@ -119,6 +121,7 @@ const css = `
 .tc-sheet-dhdr.hol { background:var(--gold-soft); color:var(--gold); }
 .tc-sheet-cell { text-align:center; width:28px; height:30px; font-size:11px; font-weight:600; }
 .tc-sheet-cell.avail { background:#c6e8d6; color:#1a5c3a; }
+.tc-sheet-cell.abroad { background:#fbdcc4; color:#a8521b; }
 .tc-sheet-cell.popular { background:#fef3c7; color:#92660a; }
 .tc-sheet-sumrow td { background:var(--paper); font-weight:700; font-size:11px; text-align:center; border-top:2px solid var(--line); }
 .tc-sheet-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:12px; color:var(--ink-soft); padding:14px 16px; border-top:1.5px solid var(--line); align-items:center; }
@@ -143,7 +146,7 @@ function addDays(ds, n) {
   const d = new Date(ds+"T00:00:00"); d.setDate(d.getDate()+n);
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 }
-function getYearData(data, year) { return data.years[year] || { holidays:[], avail:{} }; }
+function getYearData(data, year) { return data.years[year] || { holidays:[], avail:{}, abroad:{} }; }
 
 // ── group id from URL (the shareable deep link) ──────────────
 function useGroupId() {
@@ -162,13 +165,15 @@ function useGroupId() {
 
 function Tooltip({ info, members }) {
   if (!info) return null;
-  const { ds, x, y, avail } = info;
+  const { ds, x, y, avail, abroad = [] } = info;
   const date = new Date(ds+"T00:00:00");
   const label = date.toLocaleDateString("en-US",{ weekday:"short", month:"short", day:"numeric" });
   const unavail = members.filter(m => !avail.includes(m));
+  const abroadSet = new Set(abroad);
+  const rows = avail.length + unavail.length;
   const style = {
     left: Math.min(x+12, window.innerWidth - 240),
-    top: y > window.innerHeight/2 ? Math.max(10, y - (avail.length+unavail.length)*28 - 70) : y + 12,
+    top: y > window.innerHeight/2 ? Math.max(10, y - rows*28 - 90) : y + 12,
   };
   return (
     <div className="tc-tooltip" style={style}>
@@ -176,19 +181,19 @@ function Tooltip({ info, members }) {
       {avail.map(m => (
         <div className="tc-tooltip-row" key={m}>
           <span className="tc-ava" style={{ background:colorFor(m,members), width:20, height:20, fontSize:9 }}>{initials(m)}</span>
-          <span>{m}</span>
+          <span>{m}{abroadSet.has(m) ? " ✈️" : ""}</span>
           <span style={{ marginLeft:"auto", color:"#5fe09a" }}>✓</span>
         </div>
       ))}
       {unavail.map(m => (
         <div className="tc-tooltip-row" key={m} style={{ opacity:.55 }}>
           <span className="tc-ava" style={{ background:colorFor(m,members), width:20, height:20, fontSize:9 }}>{initials(m)}</span>
-          <span>{m}</span>
+          <span>{m}{abroadSet.has(m) ? " ✈️" : ""}</span>
           <span style={{ marginLeft:"auto" }}>✗</span>
         </div>
       ))}
       <div style={{ fontSize:11, opacity:.6, marginTop:8, borderTop:"1px solid #ffffff25", paddingTop:7 }}>
-        {avail.length} of {members.length} available
+        {avail.length} of {members.length} available{abroad.length ? ` · ✈️ ${abroad.length} abroad` : ""}
       </div>
     </div>
   );
@@ -202,7 +207,7 @@ export default function App() {
   const [nameInput, setNameInput] = useState("");
   const [year, setYear]   = useState(new Date().getFullYear());
   const [view, setView]   = useState("mine");
-  const [adminMode, setAdminMode] = useState(false);
+  const [mode, setMode]   = useState("off"); // "off" | "abroad" | "holiday"
   const [tooltip, setTooltip] = useState(null);
   const [toast, setToast] = useState(null);
   const savingRef = useRef(false);
@@ -229,6 +234,7 @@ export default function App() {
   const yd = useMemo(() => getYearData(data, year), [data, year]);
   const holidaySet = useMemo(() => new Set(yd.holidays), [yd]);
   const mineSet    = useMemo(() => new Set(yd.avail[me] || []), [yd, me]);
+  const myAbroadSet = useMemo(() => new Set((yd.abroad && yd.abroad[me]) || []), [yd, me]);
 
   const countsMap = useMemo(() => {
     const c = {};
@@ -236,8 +242,16 @@ export default function App() {
     return c;
   }, [data.members, yd]);
 
+  const abroadCountsMap = useMemo(() => {
+    const c = {};
+    for (const m of data.members) for (const d of ((yd.abroad && yd.abroad[m]) || [])) c[d] = (c[d]||0)+1;
+    return c;
+  }, [data.members, yd]);
+
   const availOnDate = useCallback(ds =>
     data.members.filter(m => (yd.avail[m]||[]).includes(ds)), [data.members, yd]);
+  const abroadOnDate = useCallback(ds =>
+    data.members.filter(m => ((yd.abroad && yd.abroad[m])||[]).includes(ds)), [data.members, yd]);
 
   const join = async name => {
     const n = name.trim(); if (!n) return;
@@ -252,21 +266,32 @@ export default function App() {
 
   const toggleDay = async ds => {
     savingRef.current = true;
-    if (adminMode) {
+    if (mode === "holiday") {
       const s = new Set(holidaySet); s.has(ds) ? s.delete(ds) : s.add(ds);
       const arr = [...s];
       setData(prev => {
         const next = { ...prev, years:{ ...prev.years } };
-        next.years[year] = { ...(next.years[year]||{ holidays:[], avail:{} }), holidays:arr };
+        next.years[year] = { ...(next.years[year]||{ holidays:[], avail:{}, abroad:{} }), holidays:arr };
         return next;
       });
       await saveHolidays(groupId, year, arr);
+    } else if (mode === "abroad") {
+      const s = new Set(myAbroadSet); s.has(ds) ? s.delete(ds) : s.add(ds);
+      const arr = [...s];
+      setData(prev => {
+        const next = { ...prev, years:{ ...prev.years } };
+        const ny = { ...(next.years[year]||{ holidays:[], avail:{}, abroad:{} }) };
+        ny.abroad = { ...(ny.abroad||{}), [me]:arr };
+        next.years[year] = ny;
+        return next;
+      });
+      await saveAbroad(groupId, me, year, arr);
     } else {
       const s = new Set(mineSet); s.has(ds) ? s.delete(ds) : s.add(ds);
       const arr = [...s];
       setData(prev => {
         const next = { ...prev, years:{ ...prev.years } };
-        const ny = { ...(next.years[year]||{ holidays:[], avail:{} }) };
+        const ny = { ...(next.years[year]||{ holidays:[], avail:{}, abroad:{} }) };
         ny.avail = { ...ny.avail, [me]:arr };
         next.years[year] = ny;
         return next;
@@ -278,8 +303,8 @@ export default function App() {
 
   const showTooltip = useCallback((e, ds) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    setTooltip({ ds, avail:availOnDate(ds), x:rect.left, y:rect.top });
-  }, [availOnDate]);
+    setTooltip({ ds, avail:availOnDate(ds), abroad:abroadOnDate(ds), x:rect.left, y:rect.top });
+  }, [availOnDate, abroadOnDate]);
 
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href).then(() => {
@@ -312,6 +337,7 @@ export default function App() {
     return {
       avail:   data.members.filter(m => days.every(d => (yd.avail[m]||[]).includes(d))),
       unavail: data.members.filter(m => !days.every(d => (yd.avail[m]||[]).includes(d))),
+      abroad:  data.members.filter(m => days.some(d => ((yd.abroad && yd.abroad[m])||[]).includes(d))),
     };
   }, [data.members, yd]);
 
@@ -389,12 +415,14 @@ export default function App() {
           </div>
           {view==="mine" && (
             <div className="tc-toggle" style={{ marginLeft:4 }}>
-              <button className={!adminMode?"on":""} onClick={() => setAdminMode(false)}>Tap = my day off</button>
-              <button className={adminMode?"on":""} onClick={() => setAdminMode(true)}>Tap = set holiday</button>
+              <button className={mode==="off"?"on":""} onClick={() => setMode("off")}>Tap = my day off</button>
+              <button className={mode==="abroad"?"on":""} onClick={() => setMode("abroad")}>Tap = abroad ✈️</button>
+              <button className={mode==="holiday"?"on":""} onClick={() => setMode("holiday")}>Tap = set holiday</button>
             </div>
           )}
           {view==="mine" && <div className="tc-legend">
             <span><span className="tc-dot" style={{ background:"var(--teal)" }} />available</span>
+            <span><span className="tc-dot" style={{ background:"#ed7d3a" }} />✈️ abroad</span>
             <span><span className="tc-dot" style={{ background:"var(--gold)" }} />holiday</span>
             <span><span className="tc-dot" style={{ background:"var(--terra)", opacity:.5 }} />weekend</span>
           </div>}
@@ -414,8 +442,10 @@ export default function App() {
               for (let d=1;d<=dim;d++) {
                 const ds = dateKey(year,m,d); const dow = new Date(year,m,d).getDay();
                 let cls = "tc-day"; if (dow===0||dow===6) cls += " weekend";
-                if (holidaySet.has(ds)) cls += " holiday"; if (mineSet.has(ds)) cls += " mine";
-                cells.push(<button key={ds} className={cls} onClick={() => toggleDay(ds)}>{d}</button>);
+                if (holidaySet.has(ds)) cls += " holiday";
+                if (mineSet.has(ds)) cls += " mine";
+                if (myAbroadSet.has(ds)) cls += " abroad";
+                cells.push(<button key={ds} className={cls} onClick={() => toggleDay(ds)}>{myAbroadSet.has(ds) && <span className="plane">✈️</span>}{d}</button>);
               }
               return <div className="tc-month" key={mn}>
                 <div className="tc-mname">{mn}</div>
@@ -433,15 +463,18 @@ export default function App() {
               for (let i=0;i<first;i++) cells.push(<button key={"p"+i} className="tc-day pad" disabled />);
               for (let d=1;d<=dim;d++) {
                 const ds = dateKey(year,m,d); const dow = new Date(year,m,d).getDay();
-                const cnt = countsMap[ds]||0; let cls = "tc-day"; if (dow===0||dow===6) cls += " weekend";
+                const cnt = countsMap[ds]||0; const abr = abroadCountsMap[ds]||0;
+                const hasInfo = cnt>0 || abr>0;
+                let cls = "tc-day"; if (dow===0||dow===6) cls += " weekend";
                 let style = {};
                 if (cnt>0 && data.members.length) { const r = cnt/data.members.length;
                   style = { background:`rgba(47,107,88,${0.15+0.7*r})`, color:r>0.5?"#fff":"var(--ink)", fontWeight:700 }; }
                 if (holidaySet.has(ds)) style = { ...style, outline:"2px solid var(--gold)", outlineOffset:"-2px" };
                 cells.push(
                   <button key={ds} className={cls} style={style}
-                    onMouseEnter={e => cnt>0 && showTooltip(e,ds)} onMouseLeave={() => setTooltip(null)}
-                    onClick={e => { cnt>0 ? (tooltip?.ds===ds ? setTooltip(null) : showTooltip(e,ds)) : setTooltip(null); }}>
+                    onMouseEnter={e => hasInfo && showTooltip(e,ds)} onMouseLeave={() => setTooltip(null)}
+                    onClick={e => { hasInfo ? (tooltip?.ds===ds ? setTooltip(null) : showTooltip(e,ds)) : setTooltip(null); }}>
+                    {abr>0 && <span className="plane">✈️</span>}
                     {d}{cnt>0 && <span className="cnt">{cnt}</span>}
                   </button>
                 );
@@ -478,10 +511,14 @@ export default function App() {
                     </td>
                     {sheetMonths.map(({ days }) => days.map(({ ds }) => {
                       const isAvail = (yd.avail[mbr]||[]).includes(ds);
+                      const isAbroad = ((yd.abroad && yd.abroad[mbr])||[]).includes(ds);
                       const cnt = countsMap[ds]||0; const total = data.members.length;
-                      const popular = !isAvail && cnt>0 && cnt>total/2;
-                      let cls = "tc-sheet-cell"; if (isAvail) cls += " avail"; else if (popular) cls += " popular";
-                      return <td key={ds} className={cls}>{isAvail?"✓":popular?"~":""}</td>;
+                      const popular = !isAvail && !isAbroad && cnt>0 && cnt>total/2;
+                      let cls = "tc-sheet-cell";
+                      if (isAbroad) cls += " abroad";
+                      else if (isAvail) cls += " avail";
+                      else if (popular) cls += " popular";
+                      return <td key={ds} className={cls}>{isAbroad?"✈️":isAvail?"✓":popular?"~":""}</td>;
                     }))}
                   </tr>
                 ))}
@@ -499,6 +536,7 @@ export default function App() {
           <div className="tc-sheet-legend">
             <b style={{ color:"var(--ink)", marginRight:4 }}>Legend:</b>
             <span><span className="tc-dot" style={{ background:"#c6e8d6", border:"1px solid #3d8f5f" }} />✓ Member is available</span>
+            <span><span className="tc-dot" style={{ background:"#fbdcc4", border:"1px solid #ed7d3a" }} />✈️ Abroad</span>
             <span><span className="tc-dot" style={{ background:"#fef3c7", border:"1px solid #d99a2b" }} />~ Popular day — more than half the group is free, but not this member</span>
             <span><span className="tc-dot" style={{ background:"var(--line)" }} />Not available / not marked</span>
             <span style={{ marginLeft:"auto", fontStyle:"italic", fontSize:11 }}>Bottom row = total free per day</span>
@@ -526,7 +564,17 @@ export default function App() {
                       <span key={m} className="tc-avail-name">
                         <span className="tc-ava tc-ava-lg" style={{ background:colorFor(m,data.members) }}>{initials(m)}</span>{m}
                       </span>))}</div>
-                  </div></div>
+                  </div>
+                  {ra.abroad.length > 0 && (
+                    <div className="tc-avail-row">
+                      <span style={{ fontSize:13, color:"#c2641f", fontWeight:700, minWidth:80 }}>✈️ Abroad</span>
+                      <div className="tc-avail-names">{ra.abroad.map(m => (
+                        <span key={m} className="tc-avail-name">
+                          <span className="tc-ava tc-ava-lg" style={{ background:colorFor(m,data.members) }}>{initials(m)}</span>{m}
+                        </span>))}</div>
+                    </div>
+                  )}
+                  </div>
                 </div>);
               })}
             </>)}
@@ -551,6 +599,15 @@ export default function App() {
                         <span style={{ fontSize:13, color:"var(--terra)", fontWeight:700, minWidth:80 }}>✗ Can't make it</span>
                         <div className="tc-avail-names">{ra.unavail.map(m => (
                           <span key={m} className="tc-avail-name" style={{ opacity:.65 }}>
+                            <span className="tc-ava tc-ava-lg" style={{ background:colorFor(m,data.members) }}>{initials(m)}</span>{m}
+                          </span>))}</div>
+                      </div>
+                    )}
+                    {ra.abroad.length > 0 && (
+                      <div className="tc-avail-row">
+                        <span style={{ fontSize:13, color:"#c2641f", fontWeight:700, minWidth:80 }}>✈️ Abroad</span>
+                        <div className="tc-avail-names">{ra.abroad.map(m => (
+                          <span key={m} className="tc-avail-name">
                             <span className="tc-ava tc-ava-lg" style={{ background:colorFor(m,data.members) }}>{initials(m)}</span>{m}
                           </span>))}</div>
                       </div>

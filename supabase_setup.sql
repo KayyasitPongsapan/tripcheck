@@ -41,3 +41,15 @@ alter table holidays     enable row level security;
 create policy "open members"      on members      for all using (true) with check (true);
 create policy "open availability" on availability for all using (true) with check (true);
 create policy "open holidays"     on holidays     for all using (true) with check (true);
+
+-- Each person's "abroad" days, per year (added in the abroad-feature update)
+create table if not exists abroad (
+  group_id   text not null,
+  name       text not null,
+  year       int  not null,
+  dates      jsonb not null default '[]',
+  updated_at timestamptz default now(),
+  primary key (group_id, name, year)
+);
+alter table abroad enable row level security;
+create policy "open abroad" on abroad for all using (true) with check (true);
